@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-import core.models as models
+import models
 from core.config import settings
 from database import SessionLocal, engine
 from logger import analysis_log, app_log
@@ -32,7 +32,12 @@ except Exception as e:
 
 
 # Initialize FastAPI
-app = FastAPI()
+app = FastAPI(
+    title="Analyze CVs with CEVEAI",
+    version="0.1.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
 app_log.info("FastAPI application initialized")
 
 models.Base.metadata.create_all(bind=engine)

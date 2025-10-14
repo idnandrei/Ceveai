@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "concurrently -k -n next,api \"npm:dev:next\" \"npm:dev:api\"",
-    "dev:api": "cd backend && uv run uvicorn main:app --reload",
+    "dev:api": "cd backend && uv run main.py",
     "dev:next": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
