@@ -38,6 +38,7 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
 app_log.info("FastAPI application initialized")
 
 models.Base.metadata.create_all(bind=engine)
@@ -140,6 +141,7 @@ async def analyze_cvs(
         ocr_service = OCRService()
         cv_contents = []
         for file in files:
+            app_log.info(f"parsing: {file.filename}")
             parsed_content = await ocr_service.parse_document(file)
             cv_contents.append(
                 {
@@ -147,7 +149,12 @@ async def analyze_cvs(
                     "content": parsed_content.get("markdown_content", ""),
                 }
             )
-
+            analysis_log.info(
+                {
+                    "filename": file.filename,
+                    "content": parsed_content.get("markdown_content", ""),
+                }
+            )
         # Get results from OCR service
         results = await ocr_service.analyze_cvs(
             cv_contents, parsed_criteria, parsed_prompt["job_description"]
