@@ -1,9 +1,11 @@
+import base64
 import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
 
-import google.generativeai as genai
-from openai import OpenAI
+from google import genai
+from google.genai import types
+from openai import AsyncOpenAI
 
 from logger import analysis_log, app_log
 
@@ -12,7 +14,9 @@ class BaseLLMService(ABC):
     """Base class for LLM services"""
 
     @abstractmethod
-    async def generate_response(self, messages: List[Dict[str, str]], **kwargs) -> str:
+    async def generate_response(
+        self, messages: List[Dict[str, str]], json_mode: bool = False, **kwargs
+    ) -> str:
         """Generate a response from the LLM"""
         pass
 
@@ -27,16 +31,21 @@ class OpenAIService(BaseLLMService):
 
     def __init__(self):
         api_key = os.getenv("OPENAI_API_KEY")
-        self.client = OpenAI(api_key=api_key)
+        self.client = AsyncOpenAI(api_key=api_key)
 
-    async def generate_response(self, messages: List[Dict[str, str]], **kwargs) -> str:
-        response = self.client.chat.completions.create(
-            model=kwargs.get("model", "gpt-3.5-turbo"), messages=messages, **kwargs
+    async def generate_response(
+        self, messages: List[Dict[str, str]], json_mode: bool = False, **kwargs
+    ) -> str:
+        model = kwargs.pop("model", "gpt-4o-mini")
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+        response = await self.client.chat.completions.create(
+            model=model, messages=messages, **kwargs
         )
         return response.choices[0].message.content
 
     async def generate_vision(self, messages: List[Dict[str, Any]], **kwargs) -> str:
-        response = self.client.chat.completions.create(
+        response = await self.client.chat.completions.create(
             model="gpt-4o", messages=messages, max_tokens=4096, **kwargs
         )
         return response.choices[0].message.content
@@ -45,56 +54,59 @@ class OpenAIService(BaseLLMService):
 class GeminiService(BaseLLMService):
     """Google Gemini implementation of the LLM service"""
 
+    MODEL = "gemini-2.5-flash"
+
     def __init__(self):
         api_key = os.getenv("GOOGLE_API_KEY")
-        genai.configure(api_key=api_key)
-        self.chat_model = genai.GenerativeModel("gemini-2.5-flash")
-        self.vision_model = genai.GenerativeModel("gemini-2.5-flash")
+        self.client = genai.Client(api_key=api_key)
 
-    async def generate_response(self, messages: List[Dict[str, str]], **kwargs) -> str:
-        # Convert OpenAI message format to Gemini format
-        prompt = "\n".join([f"{msg['role']}: {msg['content']}" for msg in messages])
-        response = self.chat_model.generate_content(prompt)
+    @staticmethod
+    def _split_messages(messages: List[Dict[str, Any]]):
+        """Convert OpenAI-style messages into a Gemini system instruction + parts"""
+        system_prompt = "\n".join(
+            msg["content"] for msg in messages if msg["role"] == "system"
+        )
+        parts = []
+        for msg in messages:
+            if msg["role"] == "system":
+                continue
+            content = msg["content"]
+            if isinstance(content, str):
+                parts.append(types.Part.from_text(text=content))
+                continue
+            for item in content:
+                if item["type"] == "text":
+                    parts.append(types.Part.from_text(text=item["text"]))
+                elif item["type"] == "image_url":
+                    url = item["image_url"]["url"]
+                    if url.startswith("data:"):
+                        mime_type = url.split(";")[0].split(":")[1]
+                        data = base64.b64decode(url.split("base64,")[1])
+                        parts.append(types.Part.from_bytes(data=data, mime_type=mime_type))
+        return system_prompt or None, parts
+
+    async def _generate(
+        self, messages: List[Dict[str, Any]], json_mode: bool = False
+    ) -> str:
+        system_prompt, parts = self._split_messages(messages)
+        config = types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            # Thinking adds a lot of latency and isn't needed for OCR or scoring
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+            response_mime_type="application/json" if json_mode else None,
+        )
+        response = await self.client.aio.models.generate_content(
+            model=self.MODEL, contents=parts, config=config
+        )
         return response.text
+
+    async def generate_response(
+        self, messages: List[Dict[str, str]], json_mode: bool = False, **kwargs
+    ) -> str:
+        return await self._generate(messages, json_mode=json_mode)
 
     async def generate_vision(self, messages: List[Dict[str, Any]], **kwargs) -> str:
-        # Extract the system prompt and user content
-        system_prompt = next(
-            (msg["content"] for msg in messages if msg["role"] == "system"), ""
-        )
-        user_message = next((msg for msg in messages if msg["role"] == "user"), None)
-
-        if not user_message:
-            raise ValueError("No user message found in the messages list")
-
-        # Combine text parts and image parts for Gemini
-        text_parts = []
-        image_parts = []
-
-        for content in user_message["content"]:
-            if content["type"] == "text":
-                text_parts.append(content["text"])
-            elif content["type"] == "image_url":
-                # For Gemini, we need to extract the base64 data from the URL
-                url = content["image_url"]["url"]
-                if url.startswith("data:"):
-                    # Extract mime type and base64 data
-                    mime_type = url.split(";")[0].split(":")[1]
-                    base64_data = (
-                        url.split("base64,")[1]
-                        if "base64," in url
-                        else url.split("base64,")[0]
-                    )
-                    image_parts.append({"mime_type": mime_type, "data": base64_data})
-
-        # Combine system prompt and user text
-        prompt = f"{system_prompt}\n{''.join(text_parts)}"
-
-        # Generate response using vision model
-        response = self.vision_model.generate_content(
-            contents=[prompt, *image_parts], **kwargs
-        )
-        return response.text
+        return await self._generate(messages)
 
 
 def get_llm_service() -> BaseLLMService:
@@ -110,10 +122,3 @@ def get_llm_service() -> BaseLLMService:
         raise ValueError(
             "No API keys found. Please set either OPENAI_API_KEY or GOOGLE_API_KEY in your .env file"
         )
-
-    # if openai_key:
-    #    return OpenAIService(openai_key)
-    # elif gemini_key:
-    #    return GeminiService(gemini_key)
-    # else:
-    #    raise ValueError("No API keys found. Please set either OPENAI_API_KEY or GOOGLE_API_KEY in your .env file")

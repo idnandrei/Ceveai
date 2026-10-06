@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import traceback
@@ -139,22 +140,19 @@ async def analyze_cvs(
 
         # Process CVs
         ocr_service = OCRService()
+        app_log.info(f"parsing: {[file.filename for file in files]}")
+        parsed_contents = await asyncio.gather(
+            *(ocr_service.parse_document(file) for file in files)
+        )
         cv_contents = []
-        for file in files:
-            app_log.info(f"parsing: {file.filename}")
-            parsed_content = await ocr_service.parse_document(file)
+        for file, parsed_content in zip(files, parsed_contents):
             cv_contents.append(
                 {
                     "filename": file.filename,
                     "content": parsed_content.get("markdown_content", ""),
                 }
             )
-            analysis_log.info(
-                {
-                    "filename": file.filename,
-                    "content": parsed_content.get("markdown_content", ""),
-                }
-            )
+            analysis_log.info(cv_contents[-1])
         # Get results from OCR service
         results = await ocr_service.analyze_cvs(
             cv_contents, parsed_criteria, parsed_prompt["job_description"]
